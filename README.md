@@ -10,6 +10,8 @@ build.cmd all      :: x64 + x86 (also for 32-bit applications)
 Output goes to `dist\`: `rerout.exe`, `rerout_hook_x64.dll`, `rerout-injector-x64.exe`
 (plus the `x86` variants with `all`). Keep these files in one folder.
 Settings: `%APPDATA%\rerout\config.json`.
+The icon (`crates/app/rerout.ico`) and version info (`rerout.rc`) are embedded into `rerout.exe`
+by `build.rs` (needs `rc.exe` from the Windows SDK, part of the MSVC Build Tools).
 
 ## Using it
 * **+ Running apps** - pick a process from the list (icon, process count, TCP/UDP sockets,

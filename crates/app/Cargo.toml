@@ -25,3 +25,6 @@ windows-sys = { workspace = true, features = [
     "Win32_Graphics_Gdi",
     "Win32_Storage_FileSystem",
 ] }
+
+[build-dependencies]
+embed-resource = "2"

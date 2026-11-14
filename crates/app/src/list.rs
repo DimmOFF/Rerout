@@ -99,7 +99,7 @@ fn row(
                             let name = ui
                                 .add(
                                     egui::Label::new(RichText::new(&file_name).strong().size(15.0))
-                                    .sense(egui::Sense::click()),
+                                        .sense(egui::Sense::click()),
                                 )
                                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                                 .on_hover_text("Show open connections");
@@ -122,8 +122,8 @@ fn row(
                         } else {
                             ui.label(
                                 RichText::new("Click Configure to choose which interfaces this app may use.")
-                                .small()
-                                .color(theme::ORANGE),
+                                    .small()
+                                    .color(theme::ORANGE),
                             );
                         }
                     });
@@ -213,15 +213,15 @@ fn info(ui: &mut egui::Ui, rule: &Rule, adapters: &[Adapter], resolved: Option<&
                 Some(a) => {
                     ui.label(
                         RichText::new(format!("   Using now: {}", a.display()))
-                        .small()
-                        .color(theme::GREEN),
+                            .small()
+                            .color(theme::GREEN),
                     );
                 }
                 None => {
                     ui.label(
                         RichText::new("   No allowed interface is up: network access is blocked")
-                        .small()
-                        .color(theme::RED),
+                            .small()
+                            .color(theme::RED),
                     );
                 }
             }
