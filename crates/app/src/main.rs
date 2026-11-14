@@ -14,7 +14,7 @@ mod watcher;
 use eframe::egui::{self, Align, Color32, Layout, RichText};
 use rerout_common::adapters::{self, Adapter};
 use rerout_common::config::{self, Config, Rule};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{channel, Receiver};
@@ -73,7 +73,7 @@ struct App {
     shared_rules: Arc<Mutex<Vec<Rule>>>,
     seen: Arc<Mutex<HashSet<u32>>>,
     dist: PathBuf,
-    events: Receiver<String>,
+    events: Receiver<watcher::Event>,
     status: String,
     // connections window
     details_for: Option<String>,
@@ -84,6 +84,8 @@ struct App {
     tray_ok: bool,
     view: View,
     icons: icons::IconCache,
+    /// normalized exe path -> number of processes that could not load the DLL
+    sandboxed: HashMap<String, usize>,
 }
 
 impl App {
@@ -97,7 +99,7 @@ impl App {
             .and_then(|p| p.parent().map(Path::to_path_buf))
             .unwrap_or_default();
         watcher::spawn(shared_rules.clone(), seen.clone(), dist.clone(), tx, ctx);
-        Self {
+        let mut app = Self {
             cfg,
             adapters: adapters::list(),
             last_refresh: Instant::now(),
@@ -114,7 +116,10 @@ impl App {
             tray_ok,
             view: View::List,
             icons: icons::IconCache::default(),
-        }
+            sandboxed: HashMap::new(),
+        };
+        app.remember_names();
+        app
     }
 
     fn save(&mut self) {
@@ -127,6 +132,41 @@ impl App {
     fn refresh_adapters(&mut self) {
         self.adapters = adapters::list();
         self.last_refresh = Instant::now();
+        self.remember_names();
+    }
+
+    /// Keep the last known name of every allowed interface in the rule, so that an
+    /// interface that is missing right now is still shown by name. Present adapters
+    /// give the name directly; for missing ones the registry is asked once.
+    fn remember_names(&mut self) {
+        let mut changed = false;
+        for rule in &mut self.cfg.rules {
+            for guid in rule.allowed.clone() {
+                let present = self
+                    .adapters
+                    .iter()
+                    .find(|a| a.guid.eq_ignore_ascii_case(&guid));
+                match present {
+                    Some(a) => {
+                        if rule.known_names.get(&guid) != Some(&a.name) {
+                            rule.known_names.insert(guid.clone(), a.name.clone());
+                            changed = true;
+                        }
+                    }
+                    None => {
+                        if !rule.known_names.contains_key(&guid) {
+                            if let Some(n) = adapters::registry_name(&guid) {
+                                rule.known_names.insert(guid.clone(), n);
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if changed {
+            self.save();
+        }
     }
 
     fn rule_index(&self, path: &str) -> Option<usize> {
@@ -151,12 +191,23 @@ impl App {
         View::Configure(configure::Configure::new(&self.cfg.rules[idx], &self.adapters))
     }
 
+    /// Called after every change in the Configure view: apply and save right away.
     fn apply_configure(&mut self, c: &configure::Configure) {
         if let Some(i) = self.rule_index(&c.exe_path) {
             c.apply(&mut self.cfg.rules[i], &self.adapters);
             self.save();
-            self.status = "Settings saved".into();
+            self.status = "Changes applied".into();
         }
+    }
+
+    /// Undo everything since the Configure view was opened.
+    fn revert_configure(&mut self, c: &mut configure::Configure) {
+        if let Some(i) = self.rule_index(&c.exe_path) {
+            c.restore_into(&mut self.cfg.rules[i]);
+            self.save();
+        }
+        c.revert(&self.adapters);
+        self.status = "Reverted to the settings from when this screen was opened".into();
     }
 
     /// File dialog. Returns the index of the added/selected rule.
@@ -260,8 +311,18 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        while let Ok(m) = self.events.try_recv() {
-            self.status = m;
+        while let Ok(ev) = self.events.try_recv() {
+            match ev {
+                watcher::Event::Info(m) => self.status = m,
+                watcher::Event::Sandboxed { key, name } => {
+                    let count = self.sandboxed.entry(key).or_insert(0);
+                    *count += 1;
+                    let n = *count;
+                    self.status = format!(
+                        "{name}: {n} process(es) could not load the DLL (sandboxed or protected). See the hint on its card."
+                    );
+                }
+            }
         }
 
         // Close button: minimize to the tray instead of quitting
@@ -360,18 +421,16 @@ impl eframe::App for App {
         let mut pick_action = picker::Action::None;
 
         egui::CentralPanel::default().show(ctx, |ui| match &mut view {
-            View::List => acts = list::ui(ui, &mut self.cfg.rules, &self.adapters, &mut self.icons),
+            View::List => acts = list::ui(ui, &mut self.cfg.rules, &self.adapters, &mut self.icons, &self.sandboxed),
             View::Configure(c) => cfg_action = c.ui(ui, &self.adapters, &mut self.icons),
             View::Picker(p) => pick_action = p.ui(ui, &self.adapters, &existing, &mut self.icons),
         });
 
-        match &view {
+        match &mut view {
             View::Configure(c) => match cfg_action {
-                configure::Action::Save => {
-                    self.apply_configure(c);
-                    next = Some(View::List);
-                }
-                configure::Action::Cancel => next = Some(View::List),
+                configure::Action::Changed => self.apply_configure(c),
+                configure::Action::Revert => self.revert_configure(c),
+                configure::Action::Close => next = Some(View::List),
                 configure::Action::None => {}
             },
             View::Picker(_) => match pick_action {

@@ -14,7 +14,8 @@ Settings: `%APPDATA%\rerout\config.json`.
 ## Using it
 * **+ Running apps** - pick a process from the list (icon, process count, TCP/UDP sockets,
   interfaces in use, remote endpoints). **+ Browse...** or drag & drop an `.exe` / shortcut.
-* **Configure** opens the interface view. Drag interfaces between **Allowed** and **Denied**.
+* **Configure** opens the interface view. Changes apply immediately; **Revert all changes** undoes
+  everything since the screen was opened, **Done** closes it. Drag interfaces between **Allowed** and **Denied**.
   Order inside Allowed is the priority: traffic uses the first interface that is up and
   fails over to the next one. Denied interfaces are never used. *Deny all* = the app has no
   network. *Allow loopback* can block connections to services on this PC.
@@ -36,5 +37,8 @@ Loopback destinations are never bound to an interface; listening sockets are not
 * DNS is resolved by a Windows service, the rule does not affect it.
 * UDP sent through `WSASendMsg` is not intercepted yet.
 * Applications that need administrator rights require Rerout to run as administrator.
-* Protected processes (anti-cheat) block injection.
+* Protected processes (anti-cheat) block injection. Chromium browsers run their network code in a
+  sandboxed process that cannot load the DLL; Rerout shows a hint with a launch flag that moves it
+  into the main process (`--enable-features=NetworkServiceInProcess`, documented by Chromium; newer
+  versions may ignore it).
 * Windows 10/11 x64.

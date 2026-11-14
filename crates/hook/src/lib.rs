@@ -360,7 +360,7 @@ unsafe extern "system" fn hk_wsaioctl(
         let guid = std::slice::from_raw_parts(inb as *const u8, 16);
         if guid == WSAID_CONNECTEX {
             let orig = std::ptr::read_unaligned(outb as *const usize);
-            let ours = hk_connectex as usize;
+            let ours = hk_connectex as *const () as usize;
             if orig != 0 && orig != ours {
                 CONNECTEX_ORIG.store(orig, Relaxed);
                 std::ptr::write_unaligned(outb as *mut usize, ours);

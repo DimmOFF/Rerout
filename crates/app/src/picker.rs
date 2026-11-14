@@ -204,7 +204,7 @@ impl Picker {
                 ui.push_id(i, |ui| {
                     let already = existing.contains(&norm_path(&e.path));
                     theme::card().show(ui, |ui| {
-                        ui.set_width(ui.available_width());
+                        ui.set_width(ui.available_width() - 2.0);
                         ui.horizontal(|ui| {
                             icons.show(ui, &e.path, 32.0);
                             ui.vertical(|ui| {

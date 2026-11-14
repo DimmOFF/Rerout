@@ -34,7 +34,7 @@ pub fn setup(ctx: &egui::Context) {
 pub fn card() -> egui::Frame {
     egui::Frame::none()
         .fill(CARD)
-        .stroke(Stroke::new(1.0, CARD_STROKE))
+        .stroke(Stroke::new(1.0_f32, CARD_STROKE))
         .rounding(10.0)
         .inner_margin(Margin::symmetric(14.0, 10.0))
 }

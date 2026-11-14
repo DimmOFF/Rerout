@@ -136,3 +136,41 @@ pub fn list() -> Vec<Adapter> {
     out.sort_by(|a, b| b.up.cmp(&a.up).then_with(|| a.name.cmp(&b.name)));
     out
 }
+
+/// Friendly name of an adapter that is NOT present right now. Windows keeps it in the
+/// registry for adapters it has seen before (disabled, unplugged, tethering phones...).
+pub fn registry_name(guid: &str) -> Option<String> {
+    use std::ptr::{null, null_mut};
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE,
+    };
+
+    let path = format!(
+        r"SYSTEM\CurrentControlSet\Control\Network\{{4D36E972-E325-11CE-BFC1-08002BE10318}}\{guid}\Connection"
+    );
+    let wpath: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let value: Vec<u16> = "Name\0".encode_utf16().collect();
+
+    unsafe {
+        let mut key: HKEY = null_mut();
+        if RegOpenKeyExW(HKEY_LOCAL_MACHINE, wpath.as_ptr(), 0, KEY_QUERY_VALUE, &mut key) != 0 {
+            return None;
+        }
+        let mut size: u32 = 0;
+        let mut ty: u32 = 0;
+        let r = RegQueryValueExW(key, value.as_ptr(), null(), &mut ty, null_mut(), &mut size);
+        let mut result = None;
+        if r == 0 && ty == 1 && size >= 2 {
+            // ty == 1: REG_SZ
+            let mut buf = vec![0u16; (size as usize + 1) / 2];
+            let mut sz = (buf.len() * 2) as u32;
+            let r2 = RegQueryValueExW(key, value.as_ptr(), null(), null_mut(), buf.as_mut_ptr() as *mut u8, &mut sz);
+            if r2 == 0 {
+                let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+                result = Some(String::from_utf16_lossy(&buf[..n]));
+            }
+        }
+        RegCloseKey(key);
+        result.filter(|s| !s.is_empty())
+    }
+}

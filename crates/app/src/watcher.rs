@@ -62,11 +62,21 @@ pub fn full_path(pid: u32) -> Option<String> {
     }
 }
 
+/// Messages from the background watcher to the UI.
+pub enum Event {
+    /// text for the status bar
+    Info(String),
+    /// a process of this app (normalized exe path = `key`) could not load the DLL:
+    /// typically a sandboxed Chromium subprocess. Reported separately so that a
+    /// browser with many such processes does not flood the status bar.
+    Sandboxed { key: String, name: String },
+}
+
 pub fn spawn(
     rules: Arc<Mutex<Vec<Rule>>>,
     seen: Arc<Mutex<HashSet<u32>>>,
     dist: PathBuf,
-    tx: Sender<String>,
+    tx: Sender<Event>,
     ctx: eframe::egui::Context,
 ) {
     std::thread::spawn(move || loop {
@@ -105,11 +115,15 @@ pub fn spawn(
             if full_path(*pid).map(|p| norm_path(&p)).as_deref() != Some(path.as_str()) {
                 continue;
             }
-            let msg = match rerout_inject::inject(*pid, &dist) {
-                Ok(()) => format!("Attached to {name} (PID {pid})"),
-                Err(e) => format!("Could not attach to {name} (PID {pid}): {e}"),
+            let event = match rerout_inject::inject(*pid, &dist) {
+                Ok(()) => Event::Info(format!("Attached to {name} (PID {pid})")),
+                Err(e) if e.contains("failed to load") => Event::Sandboxed {
+                    key: path.clone(),
+                    name: name.clone(),
+                },
+                Err(e) => Event::Info(format!("Could not attach to {name} (PID {pid}): {e}")),
             };
-            let _ = tx.send(msg);
+            let _ = tx.send(event);
             ctx.request_repaint();
         }
 

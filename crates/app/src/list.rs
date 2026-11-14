@@ -1,14 +1,17 @@
 //! Main list: one informational card per application.
 
 use crate::{icons::IconCache, theme};
-use eframe::egui::{self, Align, Layout, RichText};
+use eframe::egui::{self, Align, Layout, RichText, Stroke};
 use rerout_common::adapters::Adapter;
 use rerout_common::config::{self, Rule};
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Width of the button block on the right side of every card.
 const BUTTONS_W: f32 = 224.0;
 const BUTTON_MIN_W: f32 = 108.0;
+/// Width of the warning triangle in pixels (everything inside is scaled from it).
+const WARN_ICON_SIZE: f32 = 12.0;
 
 #[derive(Default)]
 pub struct Acts {
@@ -19,7 +22,13 @@ pub struct Acts {
     pub configure: Option<usize>,
 }
 
-pub fn ui(ui: &mut egui::Ui, rules: &mut [Rule], adapters: &[Adapter], icons: &mut IconCache) -> Acts {
+pub fn ui(
+    ui: &mut egui::Ui,
+    rules: &mut [Rule],
+    adapters: &[Adapter],
+    icons: &mut IconCache,
+    sandboxed: &HashMap<String, usize>,
+) -> Acts {
     let mut acts = Acts::default();
 
     if rules.is_empty() {
@@ -36,21 +45,36 @@ pub fn ui(ui: &mut egui::Ui, rules: &mut [Rule], adapters: &[Adapter], icons: &m
 
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         for (i, rule) in rules.iter_mut().enumerate() {
-            ui.push_id(i, |ui| row(ui, i, rule, adapters, icons, &mut acts));
+            ui.push_id(i, |ui| row(ui, i, rule, adapters, icons, &mut acts, sandboxed));
         }
     });
     acts
 }
 
-fn row(ui: &mut egui::Ui, i: usize, rule: &mut Rule, adapters: &[Adapter], icons: &mut IconCache, acts: &mut Acts) {
+fn row(
+    ui: &mut egui::Ui,
+    i: usize,
+    rule: &mut Rule,
+    adapters: &[Adapter],
+    icons: &mut IconCache,
+    acts: &mut Acts,
+    sandboxed: &HashMap<String, usize>,
+) {
     let resolved = config::resolve(rule, adapters);
     let file_name = Path::new(&rule.exe_path)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| rule.exe_path.clone());
+    // processes of this app that could not load the DLL, and whether it is a known Chromium browser
+    let failed = sandboxed
+        .get(&config::norm_path(&rule.exe_path))
+        .copied()
+        .unwrap_or(0);
+    let browser = is_chromium(&file_name);
 
     theme::card().show(ui, |ui| {
-        let total = ui.available_width();
+        // minus the frame stroke (1 px per side), otherwise every card is 2 px wider than the previous one
+        let total = ui.available_width() - 2.0;
         ui.set_width(total);
 
         // Two blocks with FIXED widths, so the buttons sit at the same x in every card
@@ -75,7 +99,7 @@ fn row(ui: &mut egui::Ui, i: usize, rule: &mut Rule, adapters: &[Adapter], icons
                             let name = ui
                                 .add(
                                     egui::Label::new(RichText::new(&file_name).strong().size(15.0))
-                                        .sense(egui::Sense::click()),
+                                    .sense(egui::Sense::click()),
                                 )
                                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                                 .on_hover_text("Show open connections");
@@ -87,6 +111,9 @@ fn row(ui: &mut egui::Ui, i: usize, rule: &mut Rule, adapters: &[Adapter], icons
                             } else if !rule.enabled {
                                 theme::chip(ui, "Disabled", theme::GRAY);
                             }
+                            if rule.configured && (browser || failed > 0) {
+                                warn_icon(ui, failed, browser);
+                            }
                         });
                         ui.label(RichText::new(&rule.exe_path).small().weak());
 
@@ -95,8 +122,8 @@ fn row(ui: &mut egui::Ui, i: usize, rule: &mut Rule, adapters: &[Adapter], icons
                         } else {
                             ui.label(
                                 RichText::new("Click Configure to choose which interfaces this app may use.")
-                                    .small()
-                                    .color(theme::ORANGE),
+                                .small()
+                                .color(theme::ORANGE),
                             );
                         }
                     });
@@ -186,18 +213,85 @@ fn info(ui: &mut egui::Ui, rule: &Rule, adapters: &[Adapter], resolved: Option<&
                 Some(a) => {
                     ui.label(
                         RichText::new(format!("   Using now: {}", a.display()))
-                            .small()
-                            .color(theme::GREEN),
+                        .small()
+                        .color(theme::GREEN),
                     );
                 }
                 None => {
                     ui.label(
                         RichText::new("   No allowed interface is up: network access is blocked")
-                            .small()
-                            .color(theme::RED),
+                        .small()
+                        .color(theme::RED),
                     );
                 }
             }
         }
     });
+}
+
+const CHROMIUM_FLAG: &str = "--enable-features=NetworkServiceInProcess";
+
+/// Well-known Chromium-based browsers (their network code runs in a sandboxed process).
+fn is_chromium(file_name: &str) -> bool {
+    const NAMES: [&str; 8] = [
+        "brave.exe",
+        "chrome.exe",
+        "msedge.exe",
+        "vivaldi.exe",
+        "opera.exe",
+        "chromium.exe",
+        "browser.exe",
+        "yandex.exe",
+    ];
+    let n = file_name.to_lowercase();
+    NAMES.contains(&n.as_str())
+}
+
+/// Orange warning triangle with "!": some processes cannot be controlled (sandboxed Chromium subprocesses).
+/// The explanation is in the tooltip; for known browsers a click copies the launch flag.
+fn warn_icon(ui: &mut egui::Ui, failed: usize, browser: bool) {
+    let k = WARN_ICON_SIZE;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(k + 2.0, k + 2.0), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let c = theme::ORANGE;
+        let m = rect.center();
+        let alpha = if resp.hovered() { 0.40 } else { 0.22 };
+        // warning triangle
+        ui.painter().add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(m.x, m.y - 0.46 * k),
+                egui::pos2(m.x + 0.50 * k, m.y + 0.40 * k),
+                egui::pos2(m.x - 0.50 * k, m.y + 0.40 * k),
+            ],
+            c.gamma_multiply(alpha),
+            Stroke::new(0.10 * k, c),
+        ));
+        // exclamation mark: stem + dot
+        ui.painter().line_segment(
+            [egui::pos2(m.x, m.y - 0.14 * k), egui::pos2(m.x, m.y + 0.10 * k)],
+            Stroke::new(0.12 * k, c),
+        );
+        ui.painter().circle_filled(egui::pos2(m.x, m.y + 0.25 * k), 0.07 * k, c);
+    }
+    let resp = resp.on_hover_ui(|ui| {
+        ui.set_max_width(380.0);
+        if failed > 0 {
+            ui.label(format!(
+                "{failed} process(es) of this app could not load Rerout's DLL (sandboxed or protected), \
+                 so their traffic is not controlled."
+            ));
+        }
+        if browser {
+            ui.label(
+                "Chromium browsers run their network code in a sandboxed process that cannot load the DLL. \
+                 Start the browser with this flag to run it in the main process instead \
+                 (documented by Chromium; newer versions may ignore it):",
+            );
+            ui.label(RichText::new(CHROMIUM_FLAG).monospace());
+            ui.label(RichText::new("Click the icon to copy the flag.").weak());
+        }
+    });
+    if browser && resp.clicked() {
+        ui.output_mut(|o| o.copied_text = CHROMIUM_FLAG.to_string());
+    }
 }
