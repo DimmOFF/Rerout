@@ -2587,7 +2587,7 @@ dependencies = [
 
 [[package]]
 name = "rerout"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "eframe",
  "embed-resource",
@@ -2600,7 +2600,7 @@ dependencies = [
 
 [[package]]
 name = "rerout-common"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2609,7 +2609,7 @@ dependencies = [
 
 [[package]]
 name = "rerout-hook"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "rerout-common",
  "rerout-inject",
@@ -2619,7 +2619,7 @@ dependencies = [
 
 [[package]]
 name = "rerout-inject"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "windows-sys 0.59.0",
 ]

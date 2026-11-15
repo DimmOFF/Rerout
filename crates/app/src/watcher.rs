@@ -157,3 +157,52 @@ pub fn process_tree(exe_norm: &str) -> std::collections::HashMap<u32, String> {
     }
     set
 }
+
+/// For every rule (normalized exe paths in `keys`): which processes belong to it
+/// (the exe itself and all its descendants). Result: pid -> index into `keys`.
+/// One process snapshot for all rules; `paths` caches pid -> exe path between calls.
+pub fn process_trees(
+    keys: &[String],
+    paths: &mut std::collections::HashMap<u32, Option<String>>,
+) -> std::collections::HashMap<u32, usize> {
+    let procs = processes();
+    let alive: HashSet<u32> = procs.iter().map(|(p, _, _)| *p).collect();
+    paths.retain(|p, _| alive.contains(p));
+
+    let names: Vec<String> = keys
+        .iter()
+        .map(|k| k.rsplit('\\').next().unwrap_or("").to_string())
+        .collect();
+
+    let mut owner: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    for (pid, _, name) in &procs {
+        let lname = name.to_lowercase();
+        for (i, n) in names.iter().enumerate() {
+            if *n != lname {
+                continue;
+            }
+            let path = paths.entry(*pid).or_insert_with(|| full_path(*pid)).clone();
+            if path.map(|p| norm_path(&p)).as_deref() == Some(keys[i].as_str()) {
+                owner.insert(*pid, i);
+                break;
+            }
+        }
+    }
+    // descendants belong to the same rule
+    loop {
+        let before = owner.len();
+        for (pid, ppid, _) in &procs {
+            if owner.contains_key(pid) {
+                continue;
+            }
+            let parent_owner = owner.get(ppid).copied();
+            if let Some(i) = parent_owner {
+                owner.insert(*pid, i);
+            }
+        }
+        if owner.len() == before {
+            break;
+        }
+    }
+    owner
+}

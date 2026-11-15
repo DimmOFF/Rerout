@@ -58,7 +58,7 @@ pub fn restart_as_admin() -> bool {
 pub fn wait_for_parent() {
     let Some(pid) = std::env::args().find_map(|a| {
         a.strip_prefix("--wait-pid=")
-        .and_then(|v| v.parse::<u32>().ok())
+            .and_then(|v| v.parse::<u32>().ok())
     }) else {
         return;
     };

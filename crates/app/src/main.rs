@@ -95,6 +95,11 @@ struct App {
     icons: icons::IconCache,
     /// normalized exe path -> number of processes that could not load the DLL
     sandboxed: HashMap<String, usize>,
+    /// live per-application socket summary for the icon in the list (normalized exe path)
+    summaries: HashMap<String, conns::Summary>,
+    summary_updated: Instant,
+    /// pid -> exe path cache used to attribute sockets to rules
+    owner_paths: HashMap<u32, Option<String>>,
 }
 
 impl App {
@@ -128,8 +133,12 @@ impl App {
             view: View::List,
             icons: icons::IconCache::default(),
             sandboxed: HashMap::new(),
+            summaries: HashMap::new(),
+            summary_updated: Instant::now(),
+            owner_paths: HashMap::new(),
         };
         app.remember_names();
+        app.refresh_summaries();
         app
     }
 
@@ -178,6 +187,36 @@ impl App {
         if changed {
             self.save();
         }
+    }
+
+    /// Count live sockets of every rule's application (denied / loopback) for the list icons.
+    fn refresh_summaries(&mut self) {
+        self.summary_updated = Instant::now();
+        let keys: Vec<String> = self
+            .cfg
+            .rules
+            .iter()
+            .map(|r| config::norm_path(&r.exe_path))
+            .collect();
+        if keys.is_empty() {
+            self.summaries.clear();
+            return;
+        }
+        let owner = watcher::process_trees(&keys, &mut self.owner_paths);
+        let allowed: Vec<Option<Vec<String>>> = self
+            .cfg
+            .rules
+            .iter()
+            .map(|r| {
+                if r.enabled && r.configured {
+                    Some(r.allowed.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let sums = conns::summarize(&owner, &self.adapters, &allowed);
+        self.summaries = keys.into_iter().zip(sums).collect();
     }
 
     fn rule_index(&self, path: &str) -> Option<usize> {
@@ -375,7 +414,10 @@ impl eframe::App for App {
         if self.last_refresh.elapsed() > Duration::from_secs(5) {
             self.refresh_adapters();
         }
-        ctx.request_repaint_after(Duration::from_secs(5));
+        ctx.request_repaint_after(Duration::from_secs(2));
+        if matches!(self.view, View::List) && self.summary_updated.elapsed() > Duration::from_secs(2) {
+            self.refresh_summaries();
+        }
 
         // ---- top bar ----
         let in_list = matches!(self.view, View::List);
@@ -434,7 +476,7 @@ impl eframe::App for App {
         let mut pick_action = picker::Action::None;
 
         egui::CentralPanel::default().show(ctx, |ui| match &mut view {
-            View::List => acts = list::ui(ui, &mut self.cfg.rules, &self.adapters, &mut self.icons, &self.sandboxed),
+            View::List => acts = list::ui(ui, &mut self.cfg.rules, &self.adapters, &mut self.icons, &self.sandboxed, &self.summaries),
             View::Configure(c) => cfg_action = c.ui(ui, &self.adapters, &mut self.icons),
             View::Picker(p) => pick_action = p.ui(ui, &self.adapters, &existing, &mut self.icons),
         });

@@ -6,6 +6,11 @@ it ends up in the window ("v0.1.0" next to the title), the tray tooltip, the fil
 properties of `rerout.exe` and the build output. The config file has its own
 `version` field (see `CONFIG_VERSION` in `crates/common/src/config.rs`).
 
+## [0.2.1]
+- The warning triangle in the list now reflects the live sockets of the app: orange when some of them are
+  on not-allowed interfaces (or some processes cannot be controlled), gray and muted when it only has
+  loopback sockets open (or just the Chromium tip). The tooltip explains what was found.
+
 ## [0.2.0]
 - Connections window: **Close** a TCP connection (or all connections on not-allowed interfaces) so the app
   reconnects through the current rule. Windows only allows this for IPv4 TCP and with administrator

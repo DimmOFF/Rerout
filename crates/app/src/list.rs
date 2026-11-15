@@ -1,6 +1,6 @@
 //! Main list: one informational card per application.
 
-use crate::{icons::IconCache, theme};
+use crate::{conns, icons::IconCache, theme};
 use eframe::egui::{self, Align, Layout, RichText, Stroke};
 use rerout_common::adapters::Adapter;
 use rerout_common::config::{self, Rule};
@@ -28,6 +28,7 @@ pub fn ui(
     adapters: &[Adapter],
     icons: &mut IconCache,
     sandboxed: &HashMap<String, usize>,
+    summaries: &HashMap<String, conns::Summary>,
 ) -> Acts {
     let mut acts = Acts::default();
 
@@ -45,7 +46,7 @@ pub fn ui(
 
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         for (i, rule) in rules.iter_mut().enumerate() {
-            ui.push_id(i, |ui| row(ui, i, rule, adapters, icons, &mut acts, sandboxed));
+            ui.push_id(i, |ui| row(ui, i, rule, adapters, icons, &mut acts, sandboxed, summaries));
         }
     });
     acts
@@ -59,6 +60,7 @@ fn row(
     icons: &mut IconCache,
     acts: &mut Acts,
     sandboxed: &HashMap<String, usize>,
+    summaries: &HashMap<String, conns::Summary>,
 ) {
     let resolved = config::resolve(rule, adapters);
     let file_name = Path::new(&rule.exe_path)
@@ -66,10 +68,10 @@ fn row(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| rule.exe_path.clone());
     // processes of this app that could not load the DLL, and whether it is a known Chromium browser
-    let failed = sandboxed
-        .get(&config::norm_path(&rule.exe_path))
-        .copied()
-        .unwrap_or(0);
+    let key = config::norm_path(&rule.exe_path);
+    let failed = sandboxed.get(&key).copied().unwrap_or(0);
+    // live sockets of this app: on not-allowed interfaces / on loopback
+    let sum = summaries.get(&key).copied().unwrap_or_default();
     let browser = is_chromium(&file_name);
 
     theme::card().show(ui, |ui| {
@@ -111,8 +113,9 @@ fn row(
                             } else if !rule.enabled {
                                 theme::chip(ui, "Disabled", theme::GRAY);
                             }
-                            if rule.configured && (browser || failed > 0) {
-                                warn_icon(ui, failed, browser);
+                            // orange: something is not under control; gray: informational only
+                            if rule.configured && (sum.denied > 0 || sum.local > 0 || failed > 0 || browser) {
+                                warn_icon(ui, sum, failed, browser);
                             }
                         });
                         ui.label(RichText::new(&rule.exe_path).small().weak());
@@ -247,13 +250,16 @@ fn is_chromium(file_name: &str) -> bool {
     NAMES.contains(&n.as_str())
 }
 
-/// Orange warning triangle with "!": some processes cannot be controlled (sandboxed Chromium subprocesses).
+/// Warning triangle with "!".
+/// Orange: connections on not-allowed interfaces, or processes that cannot be controlled.
+/// Gray (muted): only informational things (open loopback sockets, Chromium tip).
 /// The explanation is in the tooltip; for known browsers a click copies the launch flag.
-fn warn_icon(ui: &mut egui::Ui, failed: usize, browser: bool) {
+fn warn_icon(ui: &mut egui::Ui, sum: conns::Summary, failed: usize, browser: bool) {
+    let problem = sum.denied > 0 || failed > 0;
     let k = WARN_ICON_SIZE;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(k + 2.0, k + 2.0), egui::Sense::click());
     if ui.is_rect_visible(rect) {
-        let c = theme::ORANGE;
+        let c = if problem { theme::ORANGE } else { theme::GRAY };
         let m = rect.center();
         let alpha = if resp.hovered() { 0.40 } else { 0.22 };
         // warning triangle
@@ -275,6 +281,19 @@ fn warn_icon(ui: &mut egui::Ui, failed: usize, browser: bool) {
     }
     let resp = resp.on_hover_ui(|ui| {
         ui.set_max_width(380.0);
+        if sum.denied > 0 {
+            ui.label(format!(
+                "{} connection(s) of this app are on an interface that is not allowed. Open Connections to see them; \
+                 Close makes the app reconnect through the current rule.",
+                sum.denied
+            ));
+        }
+        if sum.local > 0 {
+            ui.label(format!(
+                "{} local / loopback socket(s) are open. They are not affected by the interface rules.",
+                sum.local
+            ));
+        }
         if failed > 0 {
             ui.label(format!(
                 "{failed} process(es) of this app could not load Rerout's DLL (sandboxed or protected), \

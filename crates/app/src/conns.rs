@@ -304,3 +304,44 @@ pub fn close_tcp4(t: Target) -> Result<(), String> {
         e => Err(format!("Windows error {e} (the connection may already be gone)")),
     }
 }
+
+/// Short per-application summary of its sockets, for the icon in the main list.
+#[derive(Default, Clone, Copy)]
+pub struct Summary {
+    /// live sockets on interfaces that are not allowed
+    pub denied: usize,
+    /// sockets on loopback addresses (not affected by the interface rules)
+    pub local: usize,
+}
+
+/// `owner`: pid -> rule index. `allowed[i]`: allowed GUIDs of rule i, or None when the rule
+/// is not enforced (disabled / not configured): then nothing counts as "denied".
+pub fn summarize(
+    owner: &HashMap<u32, usize>,
+    adapters: &[Adapter],
+    allowed: &[Option<Vec<String>>],
+) -> Vec<Summary> {
+    let mut out = vec![Summary::default(); allowed.len()];
+    for c in raw_all() {
+        let Some(&i) = owner.get(&c.pid) else { continue };
+        if c.local.is_unspecified() {
+            continue;
+        }
+        if c.local.is_loopback() {
+            out[i].local += 1;
+            continue;
+        }
+        if matches!(c.state, "LISTEN" | "TIME_WAIT" | "CLOSED") {
+            continue;
+        }
+        let Some(list) = &allowed[i] else { continue };
+        let ok = match adapter_for(c.local, adapters) {
+            Some(a) => list.iter().any(|g| g.eq_ignore_ascii_case(&a.guid)),
+            None => false,
+        };
+        if !ok {
+            out[i].denied += 1;
+        }
+    }
+    out
+}
