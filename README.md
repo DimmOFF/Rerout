@@ -13,6 +13,11 @@ Settings: `%APPDATA%\rerout\config.json`.
 The icon (`crates/app/rerout.ico`) and version info (`rerout.rc`) are embedded into `rerout.exe`
 by `build.rs` (needs `rc.exe` from the Windows SDK, part of the MSVC Build Tools).
 
+## Versioning
+The version lives in one place: `[workspace.package] version` in the root `Cargo.toml`. It is shown in the
+window (hover for build date and commit), the tray tooltip and the properties of `rerout.exe`.
+See `CHANGELOG.md`.
+
 ## Using it
 * **+ Running apps** - pick a process from the list (icon, process count, TCP/UDP sockets,
   interfaces in use, remote endpoints). **+ Browse...** or drag & drop an `.exe` / shortcut.
@@ -26,6 +31,8 @@ by `build.rs` (needs `rc.exe` from the Windows SDK, part of the MSVC Build Tools
 * **Launch** starts the app with the rule applied from the very first packet. Rules also
   attach to matching processes started elsewhere while Rerout runs (best effort).
 * **Connections** shows every socket of the app and whether its interface is allowed.
+  **Close** resets a TCP connection (or all not-allowed ones) so the app reconnects through the current
+  rule. IPv4 TCP only and it needs administrator rights (the window offers "Restart as administrator").
 * Closing the window minimizes to the tray. Tray menu: Open, Start with Windows, Quit.
 
 ## How it works

@@ -89,7 +89,7 @@ pub fn hide_main_window() {
     }
 }
 
-fn quit() -> ! {
+pub fn quit() -> ! {
     // Drop TrayIcon убирает значок из трея (иначе он «зависнет» до наведения мыши)
     TRAY.with(|t| {
         t.borrow_mut().take();
@@ -128,7 +128,7 @@ pub fn create(autostart_enabled: bool) -> bool {
     let Ok(tray) = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false) // ЛКМ — открыть окно, ПКМ — меню
-        .with_tooltip("Rerout")
+        .with_tooltip(format!("Rerout {}", crate::version::VERSION))
         .with_icon(icon)
         .build()
     else {

@@ -5,7 +5,7 @@ use rerout_common::adapters::Adapter;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use windows_sys::Win32::NetworkManagement::IpHelper::{GetExtendedTcpTable, GetExtendedUdpTable};
+use windows_sys::Win32::NetworkManagement::IpHelper::{GetExtendedTcpTable, GetExtendedUdpTable, SetTcpEntry};
 
 pub struct RawConn {
     pub pid: u32,
@@ -28,6 +28,15 @@ pub enum Verdict {
     Local,
 }
 
+/// Endpoints of an IPv4 TCP connection (what SetTcpEntry needs to identify it).
+#[derive(Clone, Copy)]
+pub struct Target {
+    pub local: Ipv4Addr,
+    pub lport: u16,
+    pub remote: Ipv4Addr,
+    pub rport: u16,
+}
+
 #[derive(Clone)]
 pub struct ConnRow {
     pub proc: String,
@@ -39,6 +48,8 @@ pub struct ConnRow {
     pub verdict: Verdict,
     /// LISTEN and loopback rows are hidden by default
     pub hideable: bool,
+    /// set for IPv4 TCP connections that can be closed
+    pub target: Option<Target>,
 }
 
 fn u32_at(b: &[u8], o: usize) -> u32 {
@@ -221,6 +232,13 @@ pub fn collect(
             }
         };
 
+        let target = match (c.proto, c.remote, c.local) {
+            ("TCP", Some((IpAddr::V4(r), rport)), IpAddr::V4(l)) if closable_state(c.state) => {
+                Some(Target { local: l, lport: c.lport, remote: r, rport })
+            }
+            _ => None,
+        };
+
         rows.push(ConnRow {
             proc: format!("{name} ({})", c.pid),
             proto: c.proto,
@@ -233,6 +251,7 @@ pub fn collect(
             state: c.state.to_string(),
             iface,
             verdict,
+            target,
         });
     }
 
@@ -250,4 +269,38 @@ pub fn collect(
             .then_with(|| a.remote.cmp(&b.remote))
     });
     rows
+}
+
+fn closable_state(s: &str) -> bool {
+    matches!(
+        s,
+        "ESTABLISHED" | "SYN_SENT" | "SYN_RCVD" | "CLOSE_WAIT" | "FIN_WAIT1" | "FIN_WAIT2" | "LAST_ACK" | "CLOSING"
+    )
+}
+
+/// Abort an IPv4 TCP connection (SetTcpEntry with the DELETE_TCB state). The application
+/// sees a reset and normally reconnects; the new connection follows the current rule.
+/// Windows only offers this for IPv4 and only with administrator rights.
+pub fn close_tcp4(t: Target) -> Result<(), String> {
+    #[repr(C)]
+    struct Row {
+        state: u32,
+        local_addr: u32,
+        local_port: u32,
+        remote_addr: u32,
+        remote_port: u32,
+    }
+    let row = Row {
+        state: 12, // MIB_TCP_STATE_DELETE_TCB
+        local_addr: u32::from_le_bytes(t.local.octets()),
+        local_port: t.lport.swap_bytes() as u32,
+        remote_addr: u32::from_le_bytes(t.remote.octets()),
+        remote_port: t.rport.swap_bytes() as u32,
+    };
+    let r = unsafe { SetTcpEntry(&row as *const Row as *const _) };
+    match r {
+        0 => Ok(()),
+        5 => Err("access denied - run Rerout as administrator".into()),
+        e => Err(format!("Windows error {e} (the connection may already be gone)")),
+    }
 }

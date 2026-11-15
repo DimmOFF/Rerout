@@ -3,12 +3,14 @@
 mod autostart;
 mod configure;
 mod conns;
+mod elevate;
 mod icons;
 mod list;
 mod logo;
 mod picker;
 mod theme;
 mod tray;
+mod version;
 mod watcher;
 
 use eframe::egui::{self, Align, Color32, Layout, RichText};
@@ -22,6 +24,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 fn main() -> eframe::Result {
+    // Started by "Restart as administrator": wait until the old instance has exited
+    elevate::wait_for_parent();
+
     // Already running (maybe in the tray): show that window and exit
     if !tray::acquire_single_instance() {
         tray::show_main_window();
@@ -81,6 +86,10 @@ struct App {
     conns_updated: Instant,
     conns_expected: String,
     hide_local: bool,
+    /// running as administrator (needed to close TCP connections)
+    elevated: bool,
+    /// result of the last close action, shown in the Connections window
+    conn_msg: String,
     tray_ok: bool,
     view: View,
     icons: icons::IconCache,
@@ -113,6 +122,8 @@ impl App {
             conns_updated: Instant::now(),
             conns_expected: String::new(),
             hide_local: true,
+            elevated: elevate::is_elevated(),
+            conn_msg: String::new(),
             tray_ok,
             view: View::List,
             icons: icons::IconCache::default(),
@@ -375,6 +386,8 @@ impl eframe::App for App {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.heading("Rerout");
+                ui.label(RichText::new(format!("v{}", version::VERSION)).small().weak())
+                    .on_hover_text(version::about());
                 ui.label(RichText::new("per-application network interface control").weak());
                 if in_list {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -459,8 +472,15 @@ impl eframe::App for App {
         }
         if let Some(i) = acts.details {
             let path = self.cfg.rules[i].exe_path.clone();
+            let already_open = self.details_for.is_some();
             self.refresh_conns(&path);
             self.details_for = Some(path);
+            if already_open {
+                // The window may be behind other windows or minimized: bring it to the front
+                let id = egui::ViewportId::from_hash_of("conn_details");
+                ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
+            }
         }
         if refresh {
             self.refresh_adapters();
@@ -488,22 +508,25 @@ impl eframe::App for App {
                     .unwrap_or_default()
             );
             let mut open = true;
+            let mut action = ConnAction::None;
+            let elevated = self.elevated;
+            let msg = self.conn_msg.clone();
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("conn_details"),
                 egui::ViewportBuilder::default()
                     .with_title(title)
-                    .with_inner_size([960.0, 520.0]),
+                    .with_inner_size([1020.0, 540.0]),
                 |ctx, class| {
                     if ctx.input(|i| i.viewport().close_requested()) {
                         open = false;
                     }
                     if class == egui::ViewportClass::Embedded {
-                        egui::Window::new("Connections").default_size([900.0, 480.0]).show(ctx, |ui| {
-                            details_ui(ui, &self.conns, &self.conns_expected, &mut self.hide_local)
+                        egui::Window::new("Connections").default_size([960.0, 500.0]).show(ctx, |ui| {
+                            action = details_ui(ui, &self.conns, &self.conns_expected, &mut self.hide_local, elevated, &msg);
                         });
                     } else {
                         egui::CentralPanel::default().show(ctx, |ui| {
-                            details_ui(ui, &self.conns, &self.conns_expected, &mut self.hide_local)
+                            action = details_ui(ui, &self.conns, &self.conns_expected, &mut self.hide_local, elevated, &msg);
                         });
                     }
                 },
@@ -511,13 +534,74 @@ impl eframe::App for App {
             if !open {
                 self.details_for = None;
             }
+            self.handle_conn_action(action, &path);
             ctx.request_repaint_after(Duration::from_secs(1));
         }
     }
 }
 
-fn details_ui(ui: &mut egui::Ui, rows: &[conns::ConnRow], expected: &str, hide_local: &mut bool) {
+/// What the user asked for in the Connections window.
+#[derive(Clone, Copy)]
+enum ConnAction {
+    None,
+    Close(conns::Target),
+    CloseDenied,
+    Elevate,
+}
+
+impl App {
+    fn handle_conn_action(&mut self, action: ConnAction, path: &str) {
+        match action {
+            ConnAction::None => return,
+            ConnAction::Close(t) => {
+                self.conn_msg = match conns::close_tcp4(t) {
+                    Ok(()) => "Connection closed. The app will reconnect using the current rule.".to_string(),
+                    Err(e) => format!("Could not close the connection: {e}"),
+                };
+            }
+            ConnAction::CloseDenied => {
+                let targets: Vec<conns::Target> = self
+                    .conns
+                    .iter()
+                    .filter(|r| r.verdict == conns::Verdict::Denied)
+                    .filter_map(|r| r.target)
+                    .collect();
+                let mut closed = 0;
+                let mut error = None;
+                for t in targets {
+                    match conns::close_tcp4(t) {
+                        Ok(()) => closed += 1,
+                        Err(e) => error = Some(e),
+                    }
+                }
+                self.conn_msg = match error {
+                    None => format!("Closed {closed} connection(s). The app will reconnect using the current rule."),
+                    Some(e) => format!("Closed {closed}, but some failed: {e}"),
+                };
+            }
+            ConnAction::Elevate => {
+                if elevate::restart_as_admin() {
+                    tray::quit(); // the new, elevated instance takes over
+                }
+                self.conn_msg = "The administrator restart was cancelled".into();
+                return;
+            }
+        }
+        self.refresh_conns(path);
+    }
+}
+
+
+fn details_ui(
+    ui: &mut egui::Ui,
+    rows: &[conns::ConnRow],
+    expected: &str,
+    hide_local: &mut bool,
+    elevated: bool,
+    msg: &str,
+) -> ConnAction {
     use conns::Verdict;
+    let mut action = ConnAction::None;
 
     ui.horizontal(|ui| {
         ui.label(RichText::new(format!("Active interface: {expected}")).strong());
@@ -537,10 +621,43 @@ fn details_ui(ui: &mut egui::Ui, rows: &[conns::ConnRow], expected: &str, hide_l
                 .color(if bad > 0 { theme::ORANGE } else { theme::GRAY }),
         );
     });
+
+    // ---- actions ----
+    let closable_bad = rows
+        .iter()
+        .filter(|r| r.verdict == Verdict::Denied && r.target.is_some())
+        .count();
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_enabled(
+                closable_bad > 0,
+                egui::Button::new(format!("Close not-allowed connections ({closable_bad})")),
+            )
+            .on_hover_text("Reset every connection that is on a not-allowed interface; the app reconnects using the current rule")
+            .clicked()
+        {
+            action = ConnAction::CloseDenied;
+        }
+        if !elevated {
+            ui.label(
+                RichText::new("Closing connections needs administrator rights.")
+                    .small()
+                    .color(theme::ORANGE),
+            );
+            if ui.button("Restart as administrator").clicked() {
+                action = ConnAction::Elevate;
+            }
+        }
+    });
+    if !msg.is_empty() {
+        ui.label(RichText::new(msg).small());
+    }
     ui.label(
         RichText::new(
             "The interface is determined from the socket's local address. Connections opened before \
-             the DLL was injected stay on their old interface. Updates every second.",
+             the DLL was injected stay on their old interface: close them here and the app reconnects \
+             through the current rule. Only IPv4 TCP connections can be closed (a Windows limitation). \
+             Updates every second.",
         )
         .small()
         .weak(),
@@ -549,16 +666,16 @@ fn details_ui(ui: &mut egui::Ui, rows: &[conns::ConnRow], expected: &str, hide_l
 
     if visible.is_empty() {
         ui.label(RichText::new("No open connections (the app is not running or not using the network)").weak());
-        return;
+        return action;
     }
 
     egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
         egui::Grid::new("conn_grid")
             .striped(true)
-            .num_columns(7)
+            .num_columns(8)
             .spacing([16.0, 6.0])
             .show(ui, |ui| {
-                for h in ["Process", "Proto", "Local address", "Remote address", "State", "Interface", "Rule"] {
+                for h in ["Process", "Proto", "Local address", "Remote address", "State", "Interface", "Rule", ""] {
                     ui.label(RichText::new(h).strong());
                 }
                 ui.end_row();
@@ -577,10 +694,25 @@ fn details_ui(ui: &mut egui::Ui, rows: &[conns::ConnRow], expected: &str, hide_l
                     ui.label(&r.state);
                     ui.label(&r.iface);
                     ui.label(RichText::new(text).color(color));
+                    match r.target {
+                        Some(t) => {
+                            if ui
+                                .small_button("Close")
+                                .on_hover_text("Reset this connection; the app reconnects using the current rule")
+                                .clicked()
+                            {
+                                action = ConnAction::Close(t);
+                            }
+                        }
+                        None => {
+                            ui.label("");
+                        }
+                    }
                     ui.end_row();
                 }
             });
     });
+    action
 }
 
 /// .exe -> as is; .lnk -> the shortcut's target.

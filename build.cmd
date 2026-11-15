@@ -6,6 +6,10 @@ rem Usage:  build.cmd        - x64 only (64-bit apps)
 rem         build.cmd all    - x64 + x86 (also 32-bit apps)
 
 set DIST=dist
+rem Version = [workspace.package] version in Cargo.toml
+set VER=?
+for /f "tokens=3" %%v in ('findstr /b /c:"version = " Cargo.toml') do set VER=%%~v
+echo Rerout %VER%
 set X64=target\x86_64-pc-windows-msvc\release
 set X86=target\i686-pc-windows-msvc\release
 
@@ -37,7 +41,7 @@ call :docopy "%X86%\rerout_hook.dll"     "%DIST%\rerout_hook_x86.dll"     || got
 
 :done
 echo.
-echo Done: %DIST%\rerout.exe
+echo Done: %DIST%\rerout.exe (version %VER%)
 goto :end
 
 :fail

@@ -47,8 +47,15 @@ fn default_true() -> bool {
     true
 }
 
+/// Version of the config file format. Bump it when the format changes and add a
+/// migration step in `load()`.
+pub const CONFIG_VERSION: u32 = 1;
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Config {
+    /// format version of the file (0 = written before versioning existed)
+    #[serde(default)]
+    pub version: u32,
     #[serde(default)]
     pub rules: Vec<Rule>,
 }
@@ -77,12 +84,17 @@ pub fn load() -> Config {
     let mut cfg = read(config_path())
         .or_else(|| read(legacy_config_path()))
         .unwrap_or_default();
-    // Rules created by older versions already had interfaces chosen
-    for r in &mut cfg.rules {
-        if !r.configured && !r.allowed.is_empty() {
-            r.configured = true;
+    // ---- migrations ----
+    if cfg.version < 1 {
+        // v0 -> v1: rules created before "configured" existed already had interfaces chosen
+        for r in &mut cfg.rules {
+            if !r.configured && !r.allowed.is_empty() {
+                r.configured = true;
+            }
         }
     }
+    // never lower the version of a file written by a newer Rerout
+    cfg.version = cfg.version.max(CONFIG_VERSION);
     cfg
 }
 
@@ -92,7 +104,9 @@ pub fn save(cfg: &Config) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let json = serde_json::to_string_pretty(cfg).map_err(std::io::Error::other)?;
+    let mut out = cfg.clone();
+    out.version = out.version.max(CONFIG_VERSION);
+    let json = serde_json::to_string_pretty(&out).map_err(std::io::Error::other)?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json)?;
     std::fs::rename(&tmp, &path)
