@@ -20,6 +20,9 @@ pub struct Rule {
     pub allowed: Vec<String>,
     #[serde(default = "default_true")]
     pub allow_loopback: bool,
+    /// id of the group this app is shown in (0 = no group)
+    #[serde(default)]
+    pub group: u32,
     /// Last known friendly names of allowed adapters (GUID -> name), so an
     /// interface that is gone right now can still be shown by name
     #[serde(default)]
@@ -34,6 +37,7 @@ impl Rule {
             configured: false,
             allowed: Vec::new(),
             allow_loopback: true,
+            group: 0,
             known_names: HashMap::new(),
         }
     }
@@ -49,15 +53,104 @@ fn default_true() -> bool {
 
 /// Version of the config file format. Bump it when the format changes and add a
 /// migration step in `load()`.
-pub const CONFIG_VERSION: u32 = 1;
+pub const CONFIG_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Config {
     /// format version of the file (0 = written before versioning existed)
     #[serde(default)]
     pub version: u32,
+    /// Display order of the applications: the order of `rules` (within a group and among ungrouped ones).
     #[serde(default)]
     pub rules: Vec<Rule>,
+    /// Groups, in display order
+    #[serde(default)]
+    pub groups: Vec<Group>,
+    /// list view mode: false = expanded, true = compact
+    #[serde(default)]
+    pub compact: bool,
+}
+
+/// A named, collapsible group of applications in the main list.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Group {
+    pub id: u32,
+    pub name: String,
+    #[serde(default)]
+    pub collapsed: bool,
+}
+
+/// Where a dragged application goes.
+#[derive(Clone, Copy, Debug)]
+pub enum Dest {
+    /// right before / after another application (takes over its group)
+    Before(usize),
+    After(usize),
+    /// to the end of a group (0 = to the end of the ungrouped ones)
+    EndOfGroup(u32),
+}
+
+impl Config {
+    pub fn new_group(&mut self, name: &str) -> u32 {
+        let id = self.groups.iter().map(|g| g.id).max().unwrap_or(0) + 1;
+        self.groups.push(Group { id, name: name.to_string(), collapsed: false });
+        id
+    }
+
+    /// Delete a group; its applications stay in the list, without a group.
+    pub fn delete_group(&mut self, id: u32) {
+        self.groups.retain(|g| g.id != id);
+        for r in &mut self.rules {
+            if r.group == id {
+                r.group = 0;
+            }
+        }
+    }
+
+    pub fn move_rule(&mut self, from: usize, dest: Dest) {
+        if from >= self.rules.len() {
+            return;
+        }
+        let (group, mut at) = match dest {
+            Dest::Before(t) if t < self.rules.len() => (self.rules[t].group, t),
+            Dest::After(t) if t < self.rules.len() => (self.rules[t].group, t + 1),
+            Dest::EndOfGroup(g) => (g, self.rules.len()),
+            _ => return,
+        };
+        let mut rule = self.rules.remove(from);
+        if from < at {
+            at -= 1;
+        }
+        rule.group = group;
+        let at = at.min(self.rules.len());
+        self.rules.insert(at, rule);
+    }
+
+    /// Move group `id` to the end of the group list.
+    pub fn move_group_to_end(&mut self, id: u32) {
+        if let Some(from) = self.groups.iter().position(|g| g.id == id) {
+            let group = self.groups.remove(from);
+            self.groups.push(group);
+        }
+    }
+
+    /// Move group `id` right before / after group `target`.
+    pub fn move_group(&mut self, id: u32, target: u32, after: bool) {
+        if id == target {
+            return;
+        }
+        let Some(from) = self.groups.iter().position(|g| g.id == id) else { return };
+        let group = self.groups.remove(from);
+        match self.groups.iter().position(|g| g.id == target) {
+            Some(mut at) => {
+                if after {
+                    at += 1;
+                }
+                self.groups.insert(at, group);
+            }
+            None => self.groups.insert(from.min(self.groups.len()), group),
+        }
+    }
 }
 
 fn appdata() -> PathBuf {

@@ -98,6 +98,8 @@ struct App {
     /// live per-application socket summary for the icon in the list (normalized exe path)
     summaries: HashMap<String, conns::Summary>,
     summary_updated: Instant,
+    /// inline group renaming
+    list_state: list::State,
     /// pid -> exe path cache used to attribute sockets to rules
     owner_paths: HashMap<u32, Option<String>>,
 }
@@ -135,6 +137,7 @@ impl App {
             sandboxed: HashMap::new(),
             summaries: HashMap::new(),
             summary_updated: Instant::now(),
+            list_state: list::State::default(),
             owner_paths: HashMap::new(),
         };
         app.remember_names();
@@ -421,17 +424,20 @@ impl eframe::App for App {
 
         // ---- top bar ----
         let in_list = matches!(self.view, View::List);
+        let cur_compact = self.cfg.compact;
         let mut open_picker = false;
         let mut browse = false;
         let mut refresh = false;
+        let mut new_group = false;
+        let mut new_compact: Option<bool> = None;
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.heading("Rerout");
                 ui.label(RichText::new(format!("v{}", version::VERSION)).small().weak())
                     .on_hover_text(version::about());
-                ui.label(RichText::new("per-application network interface control").weak());
                 if in_list {
+                    // the rightmost control is added first
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.button("Refresh").on_hover_text("Refresh the interface list").clicked() {
                             refresh = true;
@@ -449,6 +455,28 @@ impl eframe::App for App {
                             .clicked()
                         {
                             open_picker = true;
+                        }
+                        if ui
+                            .button("+ Group")
+                            .on_hover_text("Create a group; drag applications into it")
+                            .clicked()
+                        {
+                            new_group = true;
+                        }
+                        ui.separator();
+                        if ui
+                            .selectable_label(!cur_compact, "Expanded")
+                            .on_hover_text("Full information about every application")
+                            .clicked()
+                        {
+                            new_compact = Some(false);
+                        }
+                        if ui
+                            .selectable_label(cur_compact, "Compact")
+                            .on_hover_text("One line per application")
+                            .clicked()
+                        {
+                            new_compact = Some(true);
                         }
                     });
                 }
@@ -476,7 +504,17 @@ impl eframe::App for App {
         let mut pick_action = picker::Action::None;
 
         egui::CentralPanel::default().show(ctx, |ui| match &mut view {
-            View::List => acts = list::ui(ui, &mut self.cfg.rules, &self.adapters, &mut self.icons, &self.sandboxed, &self.summaries),
+            View::List => {
+                acts = list::ui(
+                    ui,
+                    &mut self.cfg,
+                    &self.adapters,
+                    &mut self.icons,
+                    &self.sandboxed,
+                    &self.summaries,
+                    &mut self.list_state,
+                )
+            }
             View::Configure(c) => cfg_action = c.ui(ui, &self.adapters, &mut self.icons),
             View::Picker(p) => pick_action = p.ui(ui, &self.adapters, &existing, &mut self.icons),
         });
@@ -500,6 +538,43 @@ impl eframe::App for App {
         }
 
         if acts.changed {
+            self.save();
+        }
+        if let Some((from, dest)) = acts.move_rule {
+            self.cfg.move_rule(from, dest);
+            self.save();
+        }
+        if let Some((id, target, after)) = acts.move_group {
+            self.cfg.move_group(id, target, after);
+            self.save();
+        }
+        if let Some(id) = acts.move_group_end {
+            self.cfg.move_group_to_end(id);
+            self.save();
+        }
+        if let Some((i, group)) = acts.set_group {
+            if i < self.cfg.rules.len() {
+                self.cfg.rules[i].group = group;
+                self.save();
+            }
+        }
+        if let Some(id) = acts.toggle_group {
+            if let Some(g) = self.cfg.groups.iter_mut().find(|g| g.id == id) {
+                g.collapsed = !g.collapsed;
+                self.save();
+            }
+        }
+        if let Some((id, name)) = acts.rename_group {
+            if let Some(g) = self.cfg.groups.iter_mut().find(|g| g.id == id) {
+                g.name = name;
+                self.save();
+            }
+        }
+        if let Some(id) = acts.delete_group {
+            self.cfg.delete_group(id);
+            if self.list_state.renaming == Some(id) {
+                self.list_state.renaming = None;
+            }
             self.save();
         }
         if let Some(i) = acts.remove {
@@ -526,6 +601,20 @@ impl eframe::App for App {
         }
         if refresh {
             self.refresh_adapters();
+        }
+        if let Some(compact) = new_compact {
+            if compact != self.cfg.compact {
+                self.cfg.compact = compact;
+                self.save();
+            }
+        }
+        if new_group {
+            let id = self.cfg.new_group("New group");
+            self.save();
+            // let the user type the name right away
+            self.list_state.renaming = Some(id);
+            self.list_state.rename_buf = "New group".into();
+            self.list_state.rename_fresh = true;
         }
         if open_picker {
             next = Some(View::Picker(picker::Picker::new(&self.adapters)));

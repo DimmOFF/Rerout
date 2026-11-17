@@ -7,6 +7,7 @@ pub const GREEN: Color32 = Color32::from_rgb(110, 200, 140);
 pub const ORANGE: Color32 = Color32::from_rgb(235, 170, 80);
 pub const RED: Color32 = Color32::from_rgb(235, 110, 110);
 pub const GRAY: Color32 = Color32::from_rgb(140, 144, 156);
+pub const GROUP_BG: Color32 = Color32::from_rgb(38, 42, 54);
 
 pub fn setup(ctx: &egui::Context) {
     let mut v = egui::Visuals::dark();
@@ -37,6 +38,15 @@ pub fn card() -> egui::Frame {
         .stroke(Stroke::new(1.0_f32, CARD_STROKE))
         .rounding(10.0)
         .inner_margin(Margin::symmetric(14.0, 10.0))
+}
+
+/// Slimmer card for the compact list mode.
+pub fn card_compact() -> egui::Frame {
+    egui::Frame::none()
+        .fill(CARD)
+        .stroke(Stroke::new(1.0_f32, CARD_STROKE))
+        .rounding(10.0)
+        .inner_margin(Margin::symmetric(12.0, 6.0))
 }
 
 /// Small colored label with a tinted background. Drawn manually (not as a nested

@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -62,6 +63,9 @@ pub fn full_path(pid: u32) -> Option<String> {
     }
 }
 
+/// Set while Rerout is shutting down and releasing its DLL: the watcher must not inject again.
+pub static STOP: AtomicBool = AtomicBool::new(false);
+
 /// Messages from the background watcher to the UI.
 pub enum Event {
     /// text for the status bar
@@ -81,6 +85,9 @@ pub fn spawn(
 ) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(500));
+        if STOP.load(Ordering::Relaxed) {
+            continue;
+        }
 
         // (имя файла в нижнем регистре, нормализованный путь)
         let active: Vec<(String, String)> = rules

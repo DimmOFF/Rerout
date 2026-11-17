@@ -21,6 +21,8 @@ See `CHANGELOG.md`.
 ## Using it
 * **+ Running apps** - pick a process from the list (icon, process count, TCP/UDP sockets,
   interfaces in use, remote endpoints). **+ Browse...** or drag & drop an `.exe` / shortcut.
+* **List**: drag cards to reorder them; **+ Group** creates a collapsible group - drag applications onto
+  its header (or use "Move to group"), drag headers to reorder groups (the list collapses to headers while you drag). **Compact / Expanded** switches the view.
 * **Configure** opens the interface view. Changes apply immediately; **Revert all changes** undoes
   everything since the screen was opened, **Done** closes it. Drag interfaces between **Allowed** and **Denied**.
   Order inside Allowed is the priority: traffic uses the first interface that is up and
@@ -33,7 +35,9 @@ See `CHANGELOG.md`.
 * **Connections** shows every socket of the app and whether its interface is allowed.
   **Close** resets a TCP connection (or all not-allowed ones) so the app reconnects through the current
   rule. IPv4 TCP only and it needs administrator rights (the window offers "Restart as administrator").
-* Closing the window minimizes to the tray. Tray menu: Open, Start with Windows, Quit.
+* Closing the window minimizes to the tray. Tray menu: Open, Start with Windows, Quit, and
+  **Quit and release hooks** (also unloads the hook DLL from all applications, so the files can be
+  replaced without closing them).
 
 ## How it works
 A DLL is injected into the target process and hooks `connect` / `WSAConnect` / `ConnectEx` /

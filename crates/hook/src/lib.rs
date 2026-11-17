@@ -16,7 +16,7 @@
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicUsize, Ordering::{Relaxed, SeqCst}};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -26,7 +26,8 @@ use windows_sys::Win32::System::LibraryLoader::{
     DisableThreadLibraryCalls, GetModuleFileNameW, GetModuleHandleW, GetProcAddress,
 };
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
-use windows_sys::Win32::System::Threading::{ResumeThread, CREATE_SUSPENDED, PROCESS_INFORMATION};
+use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE};
+use windows_sys::Win32::System::Threading::{ResumeThread, Sleep, CREATE_SUSPENDED, PROCESS_INFORMATION};
 
 type ConnectFn = unsafe extern "system" fn(usize, *const u8, i32) -> i32;
 type WsaConnectFn =
@@ -75,6 +76,31 @@ static POLICY: Mutex<Option<(Instant, Policy)>> = Mutex::new(None);
 static DIST: OnceLock<PathBuf> = OnceLock::new();
 /// Original ConnectEx (handed out by WSAIoctl)
 static CONNECTEX_ORIG: AtomicUsize = AtomicUsize::new(0);
+
+/// Number of threads that are currently executing code of this DLL (hook functions).
+/// `rerout_unhook` waits until it is zero before the DLL may be unloaded.
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+struct Busy;
+
+impl Busy {
+    fn enter() -> Busy {
+        ACTIVE.fetch_add(1, SeqCst);
+        Busy
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        ACTIVE.fetch_sub(1, SeqCst);
+    }
+}
+
+/// Page with a tiny jump thunk for ConnectEx: [0..8) = target pointer, [8..) = `jmp [target]`.
+/// Applications (libuv, Chromium) cache the ConnectEx pointer they get from WSAIoctl. That pointer
+/// must stay valid after this DLL is unloaded, so the app gets the address of the thunk (which lives
+/// outside the DLL), and on release the thunk is redirected to the real ConnectEx.
+static THUNK: OnceLock<usize> = OnceLock::new();
 
 static CONNECT_HOOK: OnceLock<GenericDetour<ConnectFn>> = OnceLock::new();
 static WSACONNECT_HOOK: OnceLock<GenericDetour<WsaConnectFn>> = OnceLock::new();
@@ -257,6 +283,7 @@ unsafe fn gate(s: usize, name: *const u8, len: i32) -> bool {
 }
 
 unsafe extern "system" fn hk_connect(s: usize, name: *const u8, len: i32) -> i32 {
+    let _busy = Busy::enter();
     let Some(h) = CONNECT_HOOK.get() else { return -1 };
     if !gate(s, name, len) {
         return -1;
@@ -273,6 +300,7 @@ unsafe extern "system" fn hk_wsaconnect(
     sqos: *const c_void,
     gqos: *const c_void,
 ) -> i32 {
+    let _busy = Busy::enter();
     let Some(h) = WSACONNECT_HOOK.get() else { return -1 };
     if !gate(s, name, len) {
         return -1;
@@ -288,6 +316,7 @@ unsafe extern "system" fn hk_sendto(
     to: *const u8,
     tolen: i32,
 ) -> i32 {
+    let _busy = Busy::enter();
     let Some(h) = SENDTO_HOOK.get() else { return -1 };
     if !gate(s, to, tolen) {
         return -1;
@@ -307,6 +336,7 @@ unsafe extern "system" fn hk_wsasendto(
     ov: *mut c_void,
     cr: *mut c_void,
 ) -> i32 {
+    let _busy = Busy::enter();
     let Some(h) = WSASENDTO_HOOK.get() else { return -1 };
     if !gate(s, to, tolen) {
         return -1;
@@ -324,6 +354,7 @@ unsafe extern "system" fn hk_connectex(
     sent: *mut u32,
     ov: *mut c_void,
 ) -> i32 {
+    let _busy = Busy::enter();
     let orig = CONNECTEX_ORIG.load(Relaxed);
     if orig == 0 {
         return 0; // FALSE
@@ -347,6 +378,7 @@ unsafe extern "system" fn hk_wsaioctl(
     ov: *mut c_void,
     cr: *mut c_void,
 ) -> i32 {
+    let _busy = Busy::enter();
     let Some(h) = WSAIOCTL_HOOK.get() else { return -1 };
     let r = h.call(s, code, inb, inl, outb, outl, ret, ov, cr);
 
@@ -360,7 +392,7 @@ unsafe extern "system" fn hk_wsaioctl(
         let guid = std::slice::from_raw_parts(inb as *const u8, 16);
         if guid == WSAID_CONNECTEX {
             let orig = std::ptr::read_unaligned(outb as *const usize);
-            let ours = hk_connectex as *const () as usize;
+            let ours = connectex_entry();
             if orig != 0 && orig != ours {
                 CONNECTEX_ORIG.store(orig, Relaxed);
                 std::ptr::write_unaligned(outb as *mut usize, ours);
@@ -383,6 +415,7 @@ unsafe extern "system" fn hk_create_process(
     si: *const c_void,
     pi: *mut PROCESS_INFORMATION,
 ) -> i32 {
+    let _busy = Busy::enter();
     let Some(h) = CREATEPROC_HOOK.get() else { return 0 };
     if pi.is_null() || IN_HOOK.with(|c| c.get()) {
         return h.call(app, cmd, pa, ta, inherit, flags, env, cwd, si, pi);
@@ -472,6 +505,82 @@ unsafe fn install(hinst: *mut c_void) {
     let k32 = GetModuleHandleW(wide("kernel32.dll").as_ptr());
     if !k32.is_null() {
         install_hook::<CreateProcessWFn>(k32, b"CreateProcessW\0", hk_create_process, &CREATEPROC_HOOK);
+    }
+}
+
+/// Address the application gets instead of ConnectEx: the thunk (outside the DLL), or, if no
+/// executable memory can be allocated, our own function (then the DLL can never be unloaded).
+unsafe fn connectex_entry() -> usize {
+    let ours = hk_connectex as *const () as usize;
+    if let Some(&base) = THUNK.get() {
+        return base + 8;
+    }
+    let base = VirtualAlloc(std::ptr::null(), 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE) as usize;
+    if base == 0 {
+        return ours;
+    }
+    std::ptr::write(base as *mut usize, ours);
+    let code = (base + 8) as *mut u8;
+    #[cfg(target_pointer_width = "64")]
+    {
+        // jmp qword ptr [rip - 14]  (the slot is at the start of the page)
+        let bytes = [0xFFu8, 0x25, 0xF2, 0xFF, 0xFF, 0xFF];
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), code, bytes.len());
+    }
+    #[cfg(target_pointer_width = "32")]
+    {
+        // jmp dword ptr [slot]
+        let mut bytes = [0xFFu8, 0x25, 0, 0, 0, 0];
+        bytes[2..6].copy_from_slice(&(base as u32).to_le_bytes());
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), code, bytes.len());
+    }
+    let _ = THUNK.set(base); // if another thread was faster, its page is used (ours is just a small leak)
+    THUNK.get().map(|b| b + 8).unwrap_or(ours)
+}
+
+unsafe fn disable_hook<T: retour::Function>(slot: &OnceLock<GenericDetour<T>>) {
+    if let Some(h) = slot.get() {
+        let _ = h.disable();
+    }
+}
+
+/// Called by Rerout in a remote thread before it unloads this DLL (FreeLibrary):
+/// restores all hooked functions and waits until no thread is inside this DLL.
+/// Returns 1 when the DLL can be unloaded safely, 0 otherwise (the hooks are off in both cases).
+#[no_mangle]
+pub extern "C" fn rerout_unhook(_arg: *mut c_void) -> u32 {
+    unsafe {
+        // 1. nobody can enter the hook functions any more
+        disable_hook(&CREATEPROC_HOOK);
+        disable_hook(&WSAIOCTL_HOOK);
+        disable_hook(&CONNECT_HOOK);
+        disable_hook(&WSACONNECT_HOOK);
+        disable_hook(&SENDTO_HOOK);
+        disable_hook(&WSASENDTO_HOOK);
+
+        // 2. ConnectEx: the application may have cached our thunk, point it to the real function
+        let orig = CONNECTEX_ORIG.load(SeqCst);
+        if orig != 0 {
+            match THUNK.get() {
+                Some(&base) => std::ptr::write_volatile(base as *mut usize, orig),
+                None => return 0, // the application holds a pointer into this DLL: never unload
+            }
+        }
+
+        // 3. wait for threads that are still inside our code
+        Sleep(50);
+        for _ in 0..100 {
+            if ACTIVE.load(SeqCst) == 0 {
+                break;
+            }
+            Sleep(20);
+        }
+        Sleep(50);
+        if ACTIVE.load(SeqCst) == 0 {
+            1
+        } else {
+            0
+        }
     }
 }
 

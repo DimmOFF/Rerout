@@ -6,6 +6,29 @@ it ends up in the window ("v0.1.0" next to the title), the tray tooltip, the fil
 properties of `rerout.exe` and the build output. The config file has its own
 `version` field (see `CONFIG_VERSION` in `crates/common/src/config.rs`).
 
+## [0.4.1]
+- Groups are shown at the top of the list, applications without a group below them.
+- Dragging a group: while a group is being dragged everything collapses to the headers, so every group
+  (and the "Ungrouped" header / the drop zone at the end) is an easy drop target; this also works
+  with a single group or a long list.
+
+## [0.4.0]
+- Tray menu: **Quit and release hooks**. Switches the hooks off in every application, unloads Rerout's
+  DLL from them (the files in `dist` are free again, no need to close the applications) and exits.
+  The hook DLL got an `rerout_unhook` entry point for this; applications that run an older hook
+  version must be restarted once. The ConnectEx pointer handed to applications now lives in a small
+  thunk outside the DLL, so cached pointers stay valid after the DLL is gone.
+
+## [0.3.1]
+- Fix: buttons inside list cards and group headers could not be clicked (the whole card started a drag).
+  Dragging now starts only from the grip on the left of a card / group header.
+
+## [0.3.0]
+- Main list: manual order by drag & drop; groups (collapsible, renamable, reorderable by dragging their
+  headers) - drag applications onto a group header or between cards, or use "Move to group".
+- Compact / Expanded view switch in the top bar (remembered). Compact shows one line per application.
+- Config format version 2 (groups and the view mode are saved in `config.json`).
+
 ## [0.2.1]
 - The warning triangle in the list now reflects the live sockets of the app: orange when some of them are
   on not-allowed interfaces (or some processes cannot be controlled), gray and muted when it only has
